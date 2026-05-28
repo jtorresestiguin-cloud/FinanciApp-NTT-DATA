@@ -1,29 +1,22 @@
 {
   "version": 2,
   "functions": {
-    "api/eu-grants.js": {
-      "maxDuration": 60
-    },
-    "api/health.js": {
-      "maxDuration": 60
-    }
+    "api/eu-grants.js": { "maxDuration": 60 },
+    "api/health.js":    { "maxDuration": 60 }
   },
+  "crons": [
+    {
+      "path": "/api/eu-grants?source=all&size=100",
+      "schedule": "0 * * * *"
+    }
+  ],
   "headers": [
     {
       "source": "/api/(.*)",
       "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, OPTIONS"
-        },
-        {
-          "key": "Cache-Control",
-          "value": "s-maxage=3600, stale-while-revalidate=600"
-        }
+        { "key": "Access-Control-Allow-Origin",  "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, OPTIONS" },
+        { "key": "Cache-Control",                "value": "s-maxage=3600, stale-while-revalidate=600" }
       ]
     }
   ]
