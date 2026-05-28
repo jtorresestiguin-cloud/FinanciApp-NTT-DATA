@@ -512,6 +512,8 @@ const WS={step:1,entity:null,objectives:new Set(),pills:{fuente:"indiferente",ho
 const LS={sort:"deadline",dir:"asc",page:1,per:8};
 const CS={open:false,history:[],ctx:null,greeted:false};
 
+const WM=["Entidad y territorio","Proyecto y objetivos","Preferencias estratégicas"];
+
 buildWizProg();
 updateStats();
 renderList();
@@ -580,8 +582,6 @@ function switchPane(id){
   if(id==="listado")renderList();
   window.scrollTo({top:0,behavior:"smooth"});
 }
-
-const WM=["Entidad y territorio","Proyecto y objetivos","Preferencias estratégicas"];
 function buildWizProg(){
   const isRes=WS.step>3;
   document.getElementById("wiz-breadcrumb").innerHTML=WM.map((s,i)=>{
