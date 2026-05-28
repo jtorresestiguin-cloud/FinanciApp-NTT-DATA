@@ -141,8 +141,10 @@ async function fetchEU({ lang = 'es', q, updatedSince, typeCodes, statusCodes } 
   let pageNumber  = 1;
   let totalPages  = 1;
 
-  const tCodes = typeCodes  || ['0', '1', '2', '8'];
-  const sCodes = statusCodes || ['31094501', '31094502', '31094503'];
+  // Excluir licitaciones (type 0) — solo subvenciones y convocatorias de propuestas
+  // Excluir cerradas (31094503) — solo abiertas (31094502) y próximas (31094501)
+  const tCodes = typeCodes  || ['1', '2', '8'];
+  const sCodes = statusCodes || ['31094501', '31094502'];
 
   // Filtro base
   const must = [
@@ -154,7 +156,7 @@ async function fetchEU({ lang = 'es', q, updatedSince, typeCodes, statusCodes } 
   }
 
   const query = { bool: { must } };
-  const sort  = { field: 'updateDate', order: 'DESC' };
+  const sort  = { field: 'deadlineDate', order: 'ASC' };
 
   do {
     const params = new URLSearchParams({
