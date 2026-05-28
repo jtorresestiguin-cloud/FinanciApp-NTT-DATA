@@ -1,12 +1,11 @@
 /**
  * FinanciApp NTT DATA — /api/eu-grants
- * BDNS + EU Funding & Tenders, ejecución en paralelo.
  *
- * Correcciones v3:
- *  - BDNS: usar campo nombreOrgano (no nombreOrganismo)
- *  - BDNS: filtrar solo abiertas/próximas desde el endpoint (estado=abierta)
- *  - BDNS: mapear fechas correctas del payload real
- *  - BDNS: pedir hasta 20 páginas de convocatorias abiertas
+ * Fuentes:
+ *  - EU: API SEDIA oficial (api.tech.ec.europa.eu) — autenticación por apiKey=SEDIA
+ *  - BDNS: infosubvenciones.es — endpoint público JSON, solo abiertas/próximas
+ *
+ * Basado en la especificación SEDIA proporcionada por el equipo de desarrollo.
  */
 
 module.exports = async function handler(req, res) {
@@ -20,11 +19,20 @@ module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=600');
 
-  const { source = 'all', status, q, page = '1', size = '50' } = req.query;
+  const {
+    source = 'all',
+    status,
+    q,
+    lang     = 'es',
+    page     = '1',
+    size     = '50',
+    pageSize = size,         // alias
+    updatedSince,
+  } = req.query;
 
   const [bdnsResult, euResult] = await Promise.allSettled([
     source === 'eu'   ? Promise.resolve([]) : fetchBDNS(),
-    source === 'bdns' ? Promise.resolve([]) : fetchEU(),
+    source === 'bdns' ? Promise.resolve([]) : fetchEU({ lang, q, updatedSince }),
   ]);
 
   const bdns   = bdnsResult.status === 'fulfilled' ? bdnsResult.value : [];
@@ -33,25 +41,27 @@ module.exports = async function handler(req, res) {
   if (bdnsResult.status === 'rejected') errors.push({ source: 'bdns', message: bdnsResult.reason?.message });
   if (euResult.status   === 'rejected') errors.push({ source: 'eu',   message: euResult.reason?.message });
 
-  // Combinar y ordenar: abiertas primero, luego por fecha cierre ascendente
+  // Ordenar: abiertas primero, luego próximas, luego cerradas; por fecha cierre asc
   const ORDER = { open: 0, forthcoming: 1, closed: 2 };
   let combined = [...bdns, ...eu].sort((a, b) => {
     const sd = (ORDER[a.status] ?? 2) - (ORDER[b.status] ?? 2);
-    if (sd !== 0) return sd;
-    return (a.deadlineSort || '9999').localeCompare(b.deadlineSort || '9999');
+    return sd !== 0 ? sd : (a.deadlineSort || '9999').localeCompare(b.deadlineSort || '9999');
   });
 
   if (status) combined = combined.filter(g => g.status === status);
-  if (q) {
+  if (q && source !== 'eu') {
+    // Si source incluye BDNS, filtramos también BDNS localmente
+    // (EU ya filtra en el servidor via SEDIA)
     const ql = q.toLowerCase();
     combined = combined.filter(g =>
+      g.src === 'eu' ||
       g.title?.toLowerCase().includes(ql) ||
       g.org?.toLowerCase().includes(ql)
     );
   }
 
-  const pageNum  = Math.max(1, parseInt(page)  || 1);
-  const pageSize = Math.min(100, parseInt(size) || 50);
+  const pageNum  = Math.max(1, parseInt(page) || 1);
+  const pageSz   = Math.min(100, parseInt(pageSize) || 50);
   const total    = combined.length;
 
   return res.status(200).json({
@@ -61,54 +71,197 @@ module.exports = async function handler(req, res) {
       bdnsCount: bdns.length,
       euCount:   eu.length,
       page:      pageNum,
-      pageSize,
-      pages:     Math.ceil(total / pageSize),
+      pageSize:  pageSz,
+      pages:     Math.ceil(total / pageSz),
       errors,
       fetchedAt: new Date().toISOString(),
     },
-    data: combined.slice((pageNum - 1) * pageSize, pageNum * pageSize),
+    data: combined.slice((pageNum - 1) * pageSz, pageNum * pageSz),
   });
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+// ════════════════════════════════════════════════════════════════════════════
+//  EU — API SEDIA oficial
+//  POST https://api.tech.ec.europa.eu/search-api/prod/rest/search
+//  Autenticación: apiKey=SEDIA (pública, sin registro)
+//  Formato body: multipart/form-data con partes JSON (query, languages, sort)
+// ════════════════════════════════════════════════════════════════════════════
 
-function timedFetch(url, options, ms) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
-  return fetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(t));
+const SEDIA_URL      = 'https://api.tech.ec.europa.eu/search-api/prod/rest/search';
+const SEDIA_API_KEY  = 'SEDIA';
+const SEDIA_PAGE_MAX = 100;
+
+// Códigos de tipo de convocatoria
+const TYPE_LABELS = {
+  '0': 'Licitación',
+  '1': 'Subvención',
+  '2': 'Convocatoria de propuestas',
+  '8': 'Financiación en cascada',
+};
+
+// Códigos de estado SEDIA → estado normalizado FinanciApp
+const STATUS_MAP = {
+  '31094501': 'forthcoming', // Forthcoming
+  '31094502': 'open',        // Open for submission
+  '31094503': 'closed',      // Closed
+};
+
+const STATUS_LABELS = {
+  '31094501': 'Próxima apertura',
+  '31094502': 'Abierta',
+  '31094503': 'Cerrada',
+};
+
+/**
+ * Construye el cuerpo multipart/form-data que espera la API SEDIA.
+ * Cada parte es un JSON independiente con su propio Content-Type.
+ */
+function buildSediaBody(query, languages, sort) {
+  const boundary = `----sedia-${Math.random().toString(16).slice(2)}`;
+  const parts = { query, languages, sort };
+  let body = '';
+
+  for (const [name, value] of Object.entries(parts)) {
+    body += `--${boundary}\r\n`;
+    body += `Content-Disposition: form-data; name="${name}"; filename="blob"\r\n`;
+    body += `Content-Type: application/json\r\n\r\n`;
+    body += `${JSON.stringify(value)}\r\n`;
+  }
+  body += `--${boundary}--\r\n`;
+
+  return { boundary, body };
 }
 
-function fmtDate(val) {
-  const d = val instanceof Date ? val : new Date(val);
-  if (isNaN(d.getTime())) return '—';
-  return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+/**
+ * Llama a SEDIA paginando hasta obtener todos los resultados.
+ * Por defecto trae todos los tipos y todos los estados.
+ */
+async function fetchEU({ lang = 'es', q, updatedSince, typeCodes, statusCodes } = {}) {
+  const allItems  = [];
+  let pageNumber  = 1;
+  let totalPages  = 1;
+
+  const tCodes = typeCodes  || ['0', '1', '2', '8'];
+  const sCodes = statusCodes || ['31094501', '31094502', '31094503'];
+
+  // Filtro base
+  const must = [
+    { terms: { type:   tCodes } },
+    { terms: { status: sCodes } },
+  ];
+  if (updatedSince) {
+    must.push({ range: { updateDate: { gte: updatedSince } } });
+  }
+
+  const query = { bool: { must } };
+  const sort  = { field: 'updateDate', order: 'DESC' };
+
+  do {
+    const params = new URLSearchParams({
+      apiKey:     SEDIA_API_KEY,
+      text:       q || '*',
+      pageSize:   String(SEDIA_PAGE_MAX),
+      pageNumber: String(pageNumber),
+      language:   lang,
+    });
+
+    const { boundary, body } = buildSediaBody(query, [lang], sort);
+
+    const res = await timedFetch(`${SEDIA_URL}?${params}`, {
+      method:  'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      body,
+    }, 20000);
+
+    if (!res.ok) throw new Error(`SEDIA HTTP ${res.status}`);
+
+    const data = await res.json();
+
+    const total      = data.totalResults ?? 0;
+    const returnedSz = data.pageSize     ?? SEDIA_PAGE_MAX;
+    totalPages = Math.ceil(total / returnedSz);
+
+    (data.results || []).forEach(raw => {
+      try { allItems.push(normSEDIA(raw)); } catch {}
+    });
+
+    pageNumber++;
+  } while (pageNumber <= totalPages && pageNumber <= 50); // máx. 5 000 resultados
+
+  return allItems;
 }
 
-function fmtAmt(val) {
-  const n = typeof val === 'string' ? parseFloat(val.replace(/[^\d.]/g, '')) : Number(val);
-  if (!n || isNaN(n)) return typeof val === 'string' ? val : 'Consultar convocatoria';
-  if (n >= 1e9) return `hasta ${(n / 1e9).toFixed(0)} B €`;
-  if (n >= 1e6) return `hasta ${(n / 1e6).toFixed(0)} M €`;
-  if (n >= 1e3) return `hasta ${(n / 1e3).toFixed(0)} k €`;
-  return `hasta ${n.toLocaleString('es-ES')} €`;
+/** Normaliza un resultado SEDIA al formato FinanciApp */
+function normSEDIA(raw) {
+  const md        = raw.metadata ?? {};
+  const first     = arr => Array.isArray(arr) && arr.length ? arr[0] : null;
+
+  const typeCode   = first(md.type);
+  const statusCode = first(md.status);
+  const status     = STATUS_MAP[statusCode] || 'closed';
+
+  const title = first(md.title)
+    || first(md.callTitle)
+    || raw.summary
+    || raw.content
+    || 'Sin título';
+
+  const url = first(md.url)
+    || first(md.esST_URL)
+    || raw.url
+    || 'https://ec.europa.eu/info/funding-tenders/opportunities/portal/';
+
+  const dlRaw  = first(md.deadlineDate) || first(md.closingDate);
+  const opRaw  = first(md.startDate);
+  const dlDate = dlRaw ? new Date(dlRaw) : null;
+
+  const budgetRaw = first(md.budgetTopicAction) || first(md.budget) || null;
+  const amountNum = budgetRaw ? parseFloat(budgetRaw) || 0 : 0;
+
+  const identifier = first(md.identifier) || raw.reference || `eu-${Math.random().toString(16).slice(2)}`;
+
+  return {
+    id:           `eu-${identifier}`,
+    src:          'eu',
+    title,
+    org:          first(md.programmeName) || first(md.programme) || 'Comisión Europea',
+    programme:    first(md.programmeAcronym) || first(md.programme) || '',
+    typeCode,
+    typeLabel:    typeCode ? (TYPE_LABELS[typeCode] || 'Otro') : 'Otro',
+    statusCode,
+    statusLabel:  STATUS_LABELS[statusCode] || 'Desconocido',
+    status,
+    amount:       amountNum > 0 ? fmtAmt(amountNum) : 'Consultar convocatoria',
+    amountNum,
+    deadline:     dlDate && !isNaN(dlDate) ? fmtDate(dlDate) : '—',
+    deadlineSort: dlDate && !isNaN(dlDate) ? dlDate.toISOString().slice(0, 10) : '9999-12-31',
+    openDate:     opRaw ? fmtDate(new Date(opRaw)) : null,
+    updatedAt:    first(md.updateDate) || first(md.es_SortDate) || null,
+    fondo:        typeCode === '0' ? 'licitacion' : 'subvencion',
+    obj:          [],
+    entity:       ['pyme','gran','startup','uni','publica','ong'],
+    tags:         [first(md.programmeAcronym), first(md.typeOfAction)].filter(Boolean),
+    url,
+    identifier,
+    callCode:     first(md.callIdentifier) || first(md.identifier) || null,
+    summary:      raw.summary || null,
+  };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 //  BDNS — infosubvenciones.es
-//  Filtrar desde el origen: solo convocatorias abiertas y próximas.
-//  El endpoint acepta el parámetro "estado" con valores: abierta, prevista
+//  Solo abiertas y próximas, filtradas desde el origen
 // ════════════════════════════════════════════════════════════════════════════
+
 const BDNS_HEADERS = {
-  'User-Agent': UA,
-  'Accept': 'application/json',
+  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+  'Accept':          'application/json',
   'Accept-Language': 'es-ES,es;q=0.9',
-  'Referer': 'https://www.infosubvenciones.es/bdnstrans/GE/es/convocatorias',
-  'Origin':  'https://www.infosubvenciones.es',
+  'Referer':         'https://www.infosubvenciones.es/bdnstrans/GE/es/convocatorias',
+  'Origin':          'https://www.infosubvenciones.es',
 };
 
 async function fetchBDNS() {
-  // Pedir abiertas y próximas en paralelo para mayor eficiencia
   const [abiertas, previstas] = await Promise.all([
     fetchBDNSByStatus('abierta'),
     fetchBDNSByStatus('prevista'),
@@ -118,7 +271,7 @@ async function fetchBDNS() {
 
 async function fetchBDNSByStatus(estado) {
   const PAGE_SIZE = 50;
-  const MAX_PAGES = 10; // 500 por estado = 1 000 total
+  const MAX_PAGES = 10;
   const all = [];
 
   for (let page = 0; page < MAX_PAGES; page++) {
@@ -126,8 +279,7 @@ async function fetchBDNSByStatus(estado) {
       `https://www.infosubvenciones.es/bdnstrans/api/convocatorias/busqueda` +
       `?page=${page}&pageSize=${PAGE_SIZE}` +
       `&order=fechaRecepcion&direccion=desc` +
-      `&vpd=GE` +
-      `&estado=${encodeURIComponent(estado)}`;
+      `&vpd=GE&estado=${encodeURIComponent(estado)}`;
 
     const res = await timedFetch(url, { headers: BDNS_HEADERS }, 15000);
     if (!res.ok) throw new Error(`BDNS HTTP ${res.status} (${estado})`);
@@ -136,72 +288,37 @@ async function fetchBDNSByStatus(estado) {
     const items = json.content || [];
     const totalPages = json.totalPages || 1;
 
-    items.forEach(item => {
-      try { all.push(normBDNS(item, estado)); } catch {}
-    });
-
+    items.forEach(item => { try { all.push(normBDNS(item, estado)); } catch {} });
     if (page + 1 >= totalPages || items.length < PAGE_SIZE) break;
   }
-
   return all;
 }
 
 function normBDNS(item, estadoFiltro) {
-  // ── Campos reales confirmados en el payload de la BDNS ────────────────────
-  // id, numeroConvocatoria, descripcion, mrr
-  // nombreOrgano (NO nombreOrganismo)
-  // fechaRecepcion = fecha de publicación/registro
-  // importeTotal, presupuesto
-  // tipoInstrumento, sectorActividad, finalidad
-  // estado (string: "Abierta", "Prevista", "Cerrada", etc.)
-  // fechaInicio, fechaFin (deben venir en detalle, no en listado)
+  const id     = item.numeroConvocatoria || String(item.id || Math.random());
+  const now    = Date.now();
+  const dlRaw  = item.fechaFinPresentacionSolicitudes || item.fechaFin || item.fechaCierre || null;
+  const opRaw  = item.fechaInicioSolicitudes || item.fechaInicio || item.fechaRecepcion || null;
 
-  const id  = item.numeroConvocatoria || String(item.id || Math.random());
-  const now = Date.now();
-
-  // Fechas: en el listado general vienen vacías; usamos fechaRecepcion como
-  // fecha de apertura y estimamos cierre si no viene
-  const openRaw = item.fechaInicio
-    || item.fechaInicioSolicitudes
-    || item.fechaRecepcion
-    || null;
-
-  const dlRaw = item.fechaFin
-    || item.fechaFinPresentacionSolicitudes
-    || item.fechaCierre
-    || null;
-
-  // Estado: prioridad al campo explícito, luego al filtro usado, luego inferir
-  const stRaw = (item.estado || estadoFiltro || '').toLowerCase();
-  let status = 'closed';
-  if (stRaw.includes('abierta') || stRaw.includes('vigente') || stRaw.includes('activa')) {
-    status = 'open';
-  } else if (stRaw.includes('prevista') || stRaw.includes('próxima') || stRaw.includes('futura')) {
-    status = 'forthcoming';
-  } else if (dlRaw && new Date(dlRaw).getTime() > now) {
-    status = openRaw && new Date(openRaw).getTime() > now ? 'forthcoming' : 'open';
-  }
+  const stRaw  = (item.estado || estadoFiltro || '').toLowerCase();
+  let status   = 'closed';
+  if (stRaw.includes('abierta') || stRaw.includes('vigente'))        status = 'open';
+  else if (stRaw.includes('prevista') || stRaw.includes('próxima'))  status = 'forthcoming';
+  else if (dlRaw && new Date(dlRaw).getTime() > now)                 status = opRaw && new Date(opRaw).getTime() > now ? 'forthcoming' : 'open';
 
   const amountNum = parseFloat(item.importeTotal || item.presupuesto || 0) || 0;
-
-  // Organismo: el payload real usa "nombreOrgano" (confirmado en bodyPreview)
-  const org = item.nombreOrgano
-    || item.nombreOrganismo
-    || item.organoConvocante
-    || item.organo
-    || 'Administración Pública';
 
   return {
     id:           `bdns-${id}`,
     src:          'bdns',
     title:        item.descripcion || item.tituloConvocatoria || 'Sin título',
-    org,
+    org:          item.nombreOrgano || item.nombreOrganismo || item.organoConvocante || 'Administración Pública',
     status,
     amount:       amountNum > 0 ? fmtAmt(amountNum) : 'Consultar convocatoria',
     amountNum,
     deadline:     dlRaw  ? fmtDate(dlRaw)  : '—',
     deadlineSort: dlRaw  ? new Date(dlRaw).toISOString().slice(0, 10) : '9999-12-31',
-    openDate:     openRaw ? fmtDate(openRaw) : null,
+    openDate:     opRaw  ? fmtDate(opRaw)  : null,
     fondo:        inferFondo(item),
     obj:          inferObjBDNS(item),
     entity:       inferEntityBDNS(item),
@@ -213,7 +330,7 @@ function normBDNS(item, estadoFiltro) {
 }
 
 function inferFondo(item) {
-  const t = (item.tipoInstrumento || item.instrumentoAyuda || '').toLowerCase();
+  const t = (item.tipoInstrumento || '').toLowerCase();
   if (t.includes('préstamo') || t.includes('prestamo')) return 'prestamo';
   if (t.includes('capital')  || t.includes('equity'))   return 'equity';
   if (t.includes('mixto'))                               return 'mixto';
@@ -221,15 +338,14 @@ function inferFondo(item) {
 }
 
 function inferObjBDNS(item) {
-  const txt = [item.descripcion, item.finalidad, item.sectorActividad]
-    .filter(Boolean).join(' ').toLowerCase();
+  const txt = [item.descripcion, item.finalidad, item.sectorActividad].filter(Boolean).join(' ').toLowerCase();
   return [
-    ['idi',       ['investigaci', 'i+d', 'innovaci', 'tecnológ', 'desarrollo tecnol']],
-    ['digital',   ['digital', 'informátic', 'software', 'cibersegur', 'inteligencia artif']],
-    ['sostenib',  ['sostenib', 'medioamb', 'ecológ', 'energía renovable', 'climát', 'circular']],
-    ['inversion', ['inversi', 'productiv', 'industria', 'manufactur', 'equipamiento']],
-    ['inter',     ['internacionaliz', 'exportaci', 'exterior']],
-    ['formacion', ['formaci', 'empleo', 'capacitaci', 'educaci', 'beca']],
+    ['idi',       ['investigaci','i+d','innovaci','tecnológ','desarrollo tecnol']],
+    ['digital',   ['digital','informátic','software','cibersegur','inteligencia artif']],
+    ['sostenib',  ['sostenib','medioamb','ecológ','energía renovable','climát','circular']],
+    ['inversion', ['inversi','productiv','industria','manufactur','equipamiento']],
+    ['inter',     ['internacionaliz','exportaci','exterior']],
+    ['formacion', ['formaci','empleo','capacitaci','educaci','beca']],
   ].filter(([, kws]) => kws.some(kw => txt.includes(kw))).map(([k]) => k);
 }
 
@@ -246,114 +362,24 @@ function inferEntityBDNS(item) {
   return out.length ? out : ['pyme','gran','startup','uni','publica','ong'];
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  EU Funding & Tenders
-//  topic-list.html → JSON (rápido) con RSS como fallback (lento)
-// ════════════════════════════════════════════════════════════════════════════
-async function fetchEU() {
-  try {
-    return await fetchEUTopicList();
-  } catch (e1) {
-    try {
-      return await fetchEURSS();
-    } catch (e2) {
-      throw new Error(`topic-list: ${e1.message} | RSS: ${e2.message}`);
-    }
-  }
+// ── Utilidades ────────────────────────────────────────────────────────────────
+function timedFetch(url, options, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(t));
 }
 
-async function fetchEUTopicList() {
-  const html = await timedFetch(
-    'https://ec.europa.eu/info/funding-tenders/opportunities/data/topic-list.html',
-    { headers: { 'User-Agent': UA } },
-    10000
-  ).then(r => { if (!r.ok) throw new Error(`HTML HTTP ${r.status}`); return r.text(); });
-
-  const match = html.match(/href="([^"]*(?:topic[^"]*\.json|\.json)[^"]*)"/i);
-  if (!match) throw new Error('No se encontró enlace JSON en topic-list.html');
-
-  const jsonUrl = match[1].startsWith('http')
-    ? match[1]
-    : `https://ec.europa.eu${match[1]}`;
-
-  const topics = await timedFetch(jsonUrl, { headers: { 'User-Agent': UA } }, 20000)
-    .then(r => { if (!r.ok) throw new Error(`JSON HTTP ${r.status}`); return r.json(); })
-    .then(j => Array.isArray(j) ? j : (j.topics || j.data || []));
-
-  if (!topics.length) throw new Error('topic-list JSON vacío');
-  return topics.map(normEUTopic).filter(t => t.title);
+function fmtDate(val) {
+  const d = val instanceof Date ? val : new Date(val);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
-function normEUTopic(t) {
-  const id     = t.identifier || t.id || t.topicId || '';
-  const dlRaw  = t.deadlineDate || t.deadline || t.endDate || null;
-  const dlDate = dlRaw ? new Date(dlRaw) : null;
-  const stRaw  = (t.status || t.submissionStatus || '').toLowerCase();
-
-  return {
-    id:           `eu-${id}`,
-    src:          'eu',
-    title:        t.title || t.topicTitle || id,
-    org:          t.programmeName || t.programme || 'Comisión Europea',
-    status:       stRaw.includes('open')  ? 'open'
-                : stRaw.includes('forth') ? 'forthcoming'
-                : 'closed',
-    amount:       t.budget ? fmtAmt(t.budget) : 'Consultar convocatoria',
-    amountNum:    parseFloat(t.budget) || 0,
-    deadline:     dlDate && !isNaN(dlDate) ? fmtDate(dlDate) : '—',
-    deadlineSort: dlDate && !isNaN(dlDate) ? dlDate.toISOString().slice(0, 10) : '9999-12-31',
-    openDate:     t.startDate ? fmtDate(new Date(t.startDate)) : null,
-    fondo:        'subvencion',
-    obj:          [],
-    entity:       ['pyme','gran','startup','uni','publica','ong'],
-    tags:         [t.programmeAcronym || t.programme].filter(Boolean),
-    url:          `https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/${id.toLowerCase()}`,
-    identifier:   id,
-  };
-}
-
-async function fetchEURSS() {
-  const xml = await timedFetch(
-    'https://ec.europa.eu/info/funding-tenders/opportunities/data/referenceData/callupdates-rss.xml',
-    { headers: { 'User-Agent': UA, 'Accept': 'application/rss+xml,application/xml,text/xml' } },
-    40000
-  ).then(r => { if (!r.ok) throw new Error(`RSS HTTP ${r.status}`); return r.text(); });
-
-  const items = [];
-  const re = /<item>([\s\S]*?)<\/item>/g;
-  let m;
-  while ((m = re.exec(xml)) !== null) {
-    const b   = m[1];
-    const get = tag => { const r = new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${tag}>`, 'i'); const f = r.exec(b); return f ? f[1].trim() : ''; };
-    const title   = get('title'); if (!title) continue;
-    const link    = get('link');
-    const dlRaw   = get('deadline') || get('ec:deadline') || '';
-    const budget  = get('budget')   || get('ec:budget')   || '';
-    const status  = get('status')   || get('ec:status')   || '';
-    const prog    = get('programme') || get('ec:programme') || 'Comisión Europea';
-    const topicId = (link.split('/').pop() || `eu-rss-${items.length}`).replace(/[?#].*/, '');
-    const dlDate  = dlRaw ? new Date(dlRaw) : null;
-    items.push({
-      id:           `eu-${topicId}`,
-      src:          'eu',
-      title,
-      org:          prog,
-      status:       status.toLowerCase().includes('open')  ? 'open'
-                  : status.toLowerCase().includes('forth') ? 'forthcoming'
-                  : 'closed',
-      amount:       budget ? fmtAmt(parseFloat(budget) || budget) : 'Consultar convocatoria',
-      amountNum:    parseFloat(budget) || 0,
-      deadline:     dlDate && !isNaN(dlDate) ? fmtDate(dlDate) : '—',
-      deadlineSort: dlDate && !isNaN(dlDate) ? dlDate.toISOString().slice(0, 10) : '9999-12-31',
-      openDate:     get('pubDate') ? fmtDate(new Date(get('pubDate'))) : null,
-      fondo:        'subvencion',
-      obj:          [],
-      entity:       ['pyme','gran','startup','uni','publica','ong'],
-      tags:         [prog],
-      url:          link || 'https://ec.europa.eu/info/funding-tenders/opportunities/portal/',
-      identifier:   topicId,
-    });
-  }
-  if (!items.length) throw new Error('EU RSS: sin items en el XML');
-  return items;
+function fmtAmt(val) {
+  const n = typeof val === 'string' ? parseFloat(val.replace(/[^\d.]/g, '')) : Number(val);
+  if (!n || isNaN(n)) return 'Consultar convocatoria';
+  if (n >= 1e9) return `hasta ${(n / 1e9).toFixed(0)} B €`;
+  if (n >= 1e6) return `hasta ${(n / 1e6).toFixed(0)} M €`;
+  if (n >= 1e3) return `hasta ${(n / 1e3).toFixed(0)} k €`;
+  return `hasta ${n.toLocaleString('es-ES')} €`;
 }
