@@ -491,27 +491,20 @@ body{font-family:'Source Sans 3',sans-serif;background:#f5f4f0;color:#1a1a1a;min
 </div>
 
 <script>
-// ── EU Grants: cargados dinámicamente desde /api/eu-grants ──────────────────
-let EU_GRANTS  = [];
+// ── Datos dinámicos: cargados desde /api/eu-grants (BDNS + EU) ───────────────
+let EU_GRANTS  = [];   // convocatorias de la API (BDNS + EU combinados)
 let EU_LOADING = false;
 let EU_ERROR   = null;
 const EU_API   = '/api/eu-grants';
 
-// Devuelve la combinación de convocatorias EU (dinámicas) + BDNS (estáticas)
+// getGrants() devuelve los datos de la API; si aún no cargaron, array vacío
 function getGrants() {
-  return [...BDNS_STATIC, ...EU_GRANTS];
+  return EU_GRANTS;
 }
 
-// ── BDNS estático (mientras no haya API BDNS) ─────────────────────────────────
-const BDNS_STATIC=[
-  {id:2,src:"bdns",title:"CDTI — Proyectos de I+D Empresarial",org:"Centro para el Desarrollo Tecnológico Industrial",status:"open",amount:"hasta 500.000 €",amountNum:500000,deadline:"31/10/2025",ds:"2025-10-31",obj:["idi"],size:["small","mid","large"],tipo:["individual","consorcio-nac"],fuente:["estatal","indiferente"],entity:["pyme","startup","gran"],fondo:"prestamo",url:"https://www.cdti.es"},
-  {id:3,src:"bdns",title:"Kit Digital — Pymes y Autónomos (Fase III)",org:"Red.es · Ministerio de Asuntos Económicos",status:"open",amount:"hasta 29.000 €",amountNum:29000,deadline:"31/12/2025",ds:"2025-12-31",obj:["digital"],size:["micro","small"],tipo:["individual"],fuente:["estatal","indiferente"],entity:["pyme","startup"],fondo:"subvencion",url:"https://www.acelerapyme.gob.es/kit-digital"},
-  {id:5,src:"bdns",title:"PERTE — Economía Circular y Gestión de Residuos",org:"Ministerio para la Transición Ecológica",status:"open",amount:"hasta 1.200.000 €",amountNum:1200000,deadline:"30/09/2025",ds:"2025-09-30",obj:["sostenib"],size:["mid","large"],tipo:["individual","consorcio-nac"],fuente:["estatal","indiferente"],entity:["pyme","gran","publica"],fondo:"subvencion",url:"https://www.miteco.gob.es"},
-  {id:7,src:"bdns",title:"Erasmus+ KA2 — Alianzas para la Formación Profesional",org:"SEPIE · Agencia Nacional Erasmus+",status:"open",amount:"hasta 400.000 €",amountNum:400000,deadline:"28/03/2026",ds:"2026-03-28",obj:["formacion","inter"],size:["small","mid"],tipo:["consorcio-int"],fuente:["ue","indiferente"],entity:["uni","publica","ong"],fondo:"subvencion",url:"https://www.sepie.es"},
-  {id:8,src:"bdns",title:"PERTE AgroAlimentario — Industria 4.0",org:"Ministerio de Industria, Comercio y Turismo",status:"upcoming",amount:"hasta 800.000 €",amountNum:800000,deadline:"15/11/2025",ds:"2025-11-15",obj:["inversion","digital"],size:["mid","large"],tipo:["individual","consorcio-nac"],fuente:["estatal","indiferente"],entity:["pyme","gran"],fondo:"mixto",url:"https://www.mincotur.gob.es"},
-  {id:10,src:"bdns",title:"Digitalización del Sector Turístico — SICTED",org:"Secretaría de Estado de Turismo",status:"open",amount:"hasta 150.000 €",amountNum:150000,deadline:"15/10/2025",ds:"2025-10-15",obj:["digital"],size:["small","mid"],tipo:["individual"],fuente:["estatal","indiferente"],entity:["pyme","startup"],fondo:"subvencion",url:"https://www.tourspain.es"},
-  {id:12,src:"bdns",title:"ICEX Next — Plan de Internacionalización Pyme",org:"ICEX España Exportación e Inversiones",status:"open",amount:"hasta 35.000 €",amountNum:35000,deadline:"30/11/2025",ds:"2025-11-30",obj:["inter"],size:["micro","small"],tipo:["individual"],fuente:["estatal","indiferente"],entity:["pyme","startup"],fondo:"subvencion",url:"https://www.icex.es"},
-];
+// BDNS_STATIC: fallback vacío (la API devuelve BDNS en tiempo real)
+const BDNS_STATIC = [];
+
 const FL={subvencion:"Subvención directa",prestamo:"Préstamo bonificado",equity:"Equity + subvención",mixto:"Mixto"};
 const SL={open:"Abierta",upcoming:"Próxima apertura",closed:"Cerrada"};
 const SC={open:"badge-open",upcoming:"badge-upcoming",closed:"badge-closed"};
@@ -528,6 +521,7 @@ async function loadEUGrants() {
   EU_LOADING = true;
   showListLoading(true);
   try {
+    // La API devuelve BDNS + EU combinados, paginamos hasta traer todo
     let page = 1, more = true;
     while (more) {
       const res = await fetch(EU_API + '?size=100&page=' + page);
@@ -535,17 +529,26 @@ async function loadEUGrants() {
       const json = await res.json();
       if (!json.ok || !json.data?.length) { more = false; break; }
       EU_GRANTS = EU_GRANTS.concat(json.data);
-      updateStats(); renderList();
+      updateStats();
+      renderList();
       more = json.meta.page < json.meta.pages;
       page++;
     }
+    if (!EU_GRANTS.length) throw new Error('Sin datos');
   } catch(err) {
     EU_ERROR = err.message;
-    console.warn('[FinanciApp] EU API no disponible, usando datos estáticos:', err.message);
+    console.warn('[FinanciApp] API no disponible:', err.message);
+    // Mostrar mensaje de error en tabla
+    const tb = document.getElementById("list-tbody");
+    if (tb && !EU_GRANTS.length) {
+      tb.innerHTML = '<tr><td colspan="8" style="padding:2rem;text-align:center;color:#8b1a1a;font-size:12.5px">'
+        + 'No se pudieron cargar las convocatorias. <a href="javascript:location.reload()" style="color:#0054a6">Reintentar</a></td></tr>';
+    }
   } finally {
     EU_LOADING = false;
     showListLoading(false);
-    updateStats(); renderList();
+    updateStats();
+    renderList();
   }
 }
 
@@ -557,9 +560,14 @@ function updateStats() {
 }
 
 function showListLoading(show) {
-  if (!EU_GRANTS.length && show) {
-    const tb = document.getElementById("list-tbody");
-    if (tb) tb.innerHTML = '<tr><td colspan="8" style="padding:2rem;text-align:center;color:var(--ink3);font-size:12.5px"><span style="display:inline-flex;align-items:center;gap:8px"><span style="width:12px;height:12px;border:2px solid var(--rule2);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;display:inline-block"></span>Cargando convocatorias de Funding &amp; Tenders EU…</span></td></tr>';
+  const tb = document.getElementById("list-tbody");
+  if (!tb) return;
+  if (show && !EU_GRANTS.length) {
+    tb.innerHTML = '<tr><td colspan="8" style="padding:2rem;text-align:center;color:var(--ink3);font-size:12.5px">'
+      + '<span style="display:inline-flex;align-items:center;gap:8px">'
+      + '<span style="width:12px;height:12px;border:2px solid #c4c2bb;border-top-color:#0054a6;border-radius:50%;animation:spin .7s linear infinite;display:inline-block"></span>'
+      + 'Cargando convocatorias de BDNS y Funding &amp; Tenders EU…'
+      + '</span></td></tr>';
   }
 }
 
@@ -671,8 +679,8 @@ function sortList(col){
 function renderList(){
   let data=[...getFiltered()];
   data.sort((a,b)=>{
-    let av=LS.sort==="deadline"?a.ds:LS.sort==="amount"?a.amountNum:(a[LS.sort]||"");
-    let bv=LS.sort==="deadline"?b.ds:LS.sort==="amount"?b.amountNum:(b[LS.sort]||"");
+    let av=LS.sort==="deadline"?(a.deadlineSort||a.ds):LS.sort==="amount"?a.amountNum:(a[LS.sort]||"");
+    let bv=LS.sort==="deadline"?(b.deadlineSort||b.ds):LS.sort==="amount"?b.amountNum:(b[LS.sort]||"");
     const r=typeof av==="number"?av-bv:String(av).localeCompare(String(bv),"es");
     return LS.dir==="asc"?r:-r;
   });
