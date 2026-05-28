@@ -491,264 +491,425 @@ body{font-family:'Source Sans 3',sans-serif;background:#f5f4f0;color:#1a1a1a;min
 </div>
 
 <script>
-// ── Datos dinámicos: cargados desde /api/eu-grants (BDNS + EU) ───────────────
-let EU_GRANTS  = [];   // convocatorias de la API (BDNS + EU combinados)
-let EU_LOADING = false;
-let EU_ERROR   = null;
-const EU_API   = '/api/eu-grants';
+/* ══════════════════════════════════════════════
+   FinanciApp NTT DATA — JavaScript
+   Carga datos de /api/eu-grants y renderiza la UI
+══════════════════════════════════════════════ */
 
-// getGrants() devuelve los datos de la API; si aún no cargaron, array vacío
-function getGrants() {
-  return EU_GRANTS;
-}
+// ── Estado global ─────────────────────────────
+var GRANTS = [];          // convocatorias cargadas
+var LIST_SORT = 'deadline';
+var LIST_DIR  = 'asc';
+var LIST_PAGE = 1;
+var LIST_PER  = 8;
+var WIZ_STEP  = 1;
+var WIZ_ENTITY = null;
+var WIZ_OBJS   = [];
+var WIZ_BUDGET = '';
+var WIZ_FUENTE = 'indiferente';
+var WIZ_HORIZONTE = 'medio';
+var WIZ_TIPO   = null;
 
-// BDNS_STATIC: fallback vacío (la API devuelve BDNS en tiempo real)
-const BDNS_STATIC = [];
+var WM = ['Entidad y territorio', 'Proyecto y objetivos', 'Preferencias estratégicas'];
 
-const FL={subvencion:"Subvención directa",prestamo:"Préstamo bonificado",equity:"Equity + subvención",mixto:"Mixto"};
-const SL={open:"Abierta",upcoming:"Próxima apertura",closed:"Cerrada"};
-const SC={open:"badge-open",upcoming:"badge-upcoming",closed:"badge-closed"};
-const WS={step:1,entity:null,objectives:new Set(),pills:{fuente:"indiferente",horizonte:"medio",tipo:null}};
-const LS={sort:"deadline",dir:"asc",page:1,per:8};
-const CS={open:false,history:[],ctx:null,greeted:false};
+var FL = {subvencion:'Subvención directa', prestamo:'Préstamo bonificado', equity:'Equity + subvención', mixto:'Mixto', licitacion:'Licitación'};
+var SL = {open:'Abierta', forthcoming:'Próxima apertura', closed:'Cerrada'};
+var SC = {open:'badge-open', forthcoming:'badge-upcoming', closed:'badge-closed'};
 
-const WM=["Entidad y territorio","Proyecto y objetivos","Preferencias estratégicas"];
-
+// ── Inicialización ────────────────────────────
 buildWizProg();
-updateStats();
 renderList();
-loadEUGrants();
+loadGrants();
 
-async function loadEUGrants() {
-  EU_LOADING = true;
-  showListLoading(true);
-  try {
-    // La API devuelve BDNS + EU combinados, paginamos hasta traer todo
-    let page = 1, more = true;
-    while (more) {
-      const res = await fetch(EU_API + '?size=100&page=' + page);
+// ── Carga de datos desde API ──────────────────
+function loadGrants() {
+  var tb = document.getElementById('list-tbody');
+  if (tb) {
+    tb.innerHTML = '<tr><td colspan="8" style="padding:2rem;text-align:center;color:var(--ink3);font-size:12.5px">'
+      + '<span style="display:inline-flex;align-items:center;gap:8px">'
+      + '<span style="width:12px;height:12px;border:2px solid #c4c2bb;border-top-color:#0054a6;'
+      + 'border-radius:50%;animation:spin .7s linear infinite;display:inline-block"></span>'
+      + 'Cargando convocatorias…</span></td></tr>';
+  }
+
+  fetch('/api/eu-grants?size=100&page=1')
+    .then(function(res) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
-      const json = await res.json();
-      if (!json.ok || !json.data?.length) { more = false; break; }
-      EU_GRANTS = EU_GRANTS.concat(json.data);
+      return res.json();
+    })
+    .then(function(json) {
+      if (json.ok && json.data && json.data.length) {
+        GRANTS = json.data;
+      } else {
+        throw new Error('Sin datos');
+      }
       updateStats();
       renderList();
-      more = json.meta.page < json.meta.pages;
-      page++;
-    }
-    if (!EU_GRANTS.length) throw new Error('Sin datos');
-  } catch(err) {
-    EU_ERROR = err.message;
-    console.warn('[FinanciApp] API no disponible:', err.message);
-    // Mostrar mensaje de error en tabla
-    const tb = document.getElementById("list-tbody");
-    if (tb && !EU_GRANTS.length) {
-      tb.innerHTML = '<tr><td colspan="8" style="padding:2rem;text-align:center;color:#8b1a1a;font-size:12.5px">'
-        + 'No se pudieron cargar las convocatorias. <a href="javascript:location.reload()" style="color:#0054a6">Reintentar</a></td></tr>';
-    }
-  } finally {
-    EU_LOADING = false;
-    showListLoading(false);
-    updateStats();
-    renderList();
-  }
+    })
+    .catch(function(err) {
+      console.warn('[FinanciApp] API error:', err.message);
+      var tb2 = document.getElementById('list-tbody');
+      if (tb2) {
+        tb2.innerHTML = '<tr><td colspan="8" style="padding:2rem;text-align:center;color:#8b1a1a;font-size:12.5px">'
+          + 'Error al cargar convocatorias. '
+          + '<a href="javascript:location.reload()" style="color:#0054a6">Reintentar</a></td></tr>';
+      }
+    });
 }
 
 function updateStats() {
-  const all = getGrants();
-  document.getElementById("s-total").textContent = all.length;
-  document.getElementById("s-open").textContent  = all.filter(g=>g.status==="open").length;
-  document.getElementById("stc-listado").textContent = all.length;
+  var el_total = document.getElementById('s-total');
+  var el_open  = document.getElementById('s-open');
+  var el_stc   = document.getElementById('stc-listado');
+  if (el_total) el_total.textContent = GRANTS.length;
+  if (el_open)  el_open.textContent  = GRANTS.filter(function(g){return g.status==='open';}).length;
+  if (el_stc)   el_stc.textContent   = GRANTS.length;
 }
 
-function showListLoading(show) {
-  const tb = document.getElementById("list-tbody");
-  if (!tb) return;
-  if (show && !EU_GRANTS.length) {
-    tb.innerHTML = '<tr><td colspan="8" style="padding:2rem;text-align:center;color:var(--ink3);font-size:12.5px">'
-      + '<span style="display:inline-flex;align-items:center;gap:8px">'
-      + '<span style="width:12px;height:12px;border:2px solid #c4c2bb;border-top-color:#0054a6;border-radius:50%;animation:spin .7s linear infinite;display:inline-block"></span>'
-      + 'Cargando convocatorias de BDNS y Funding &amp; Tenders EU…'
-      + '</span></td></tr>';
-  }
-}
-
-function switchPane(id){
-  ["wizard","listado"].forEach(p=>{
-    document.getElementById("pane-"+p).classList.toggle("on",p===id);
-    document.getElementById("st-"+p)?.classList.toggle("on",p===id);
-    document.getElementById("tn-"+p)?.classList.toggle("on",p===id);
+// ── Navegación de secciones ───────────────────
+function switchPane(id) {
+  ['wizard','listado'].forEach(function(p) {
+    var pane = document.getElementById('pane-'+p);
+    var st   = document.getElementById('st-'+p);
+    var tn   = document.getElementById('tn-'+p);
+    if (pane) pane.classList.toggle('on', p===id);
+    if (st)   st.classList.toggle('on', p===id);
+    if (tn)   tn.classList.toggle('on', p===id);
   });
-  if(id==="listado")renderList();
-  window.scrollTo({top:0,behavior:"smooth"});
-}
-function buildWizProg(){
-  const isRes=WS.step>3;
-  document.getElementById("wiz-breadcrumb").innerHTML=WM.map((s,i)=>{
-    const n=i+1,done=WS.step>n,act=WS.step===n;
-    const cls=done?"done":act?"active":"";
-    return `<div class="wb-item ${cls}"><div class="wb-num">${done?"✓":n}</div><span>${s}</span></div>${i<WM.length-1?'<div class="wb-sep"></div>':''}`;
-  }).join("");
-  document.getElementById("wiz-step-lbl").innerHTML=isRes?"<b>Resultados</b> del cuestionario":`Paso <b>${WS.step}</b> de 3`;
-}
-function goNext(from){document.getElementById("ws"+from).classList.remove("on");WS.step=from+1;document.getElementById("ws"+WS.step).classList.add("on");buildWizProg();window.scrollTo({top:document.querySelector(".wizard-wrap")?.offsetTop-55||0,behavior:"smooth"});}
-function goBack(from){document.getElementById("ws"+from).classList.remove("on");WS.step=from-1;document.getElementById("ws"+WS.step).classList.add("on");buildWizProg();}
-function pick(step,val,el){WS.entity=val;document.querySelectorAll("#opts"+step+" .opt-tile").forEach(o=>o.classList.remove("sel"));el.classList.add("sel");const nb=document.getElementById("nxt"+step);if(nb)nb.disabled=false;}
-function mpick(step,val,el){if(WS.objectives.has(val)){WS.objectives.delete(val);el.classList.remove("sel");}else{WS.objectives.add(val);el.classList.add("sel");}const nb=document.getElementById("nxt"+step);if(nb)nb.disabled=WS.objectives.size===0;}
-function ppick(grp,val,el){WS.pills[grp]=val;document.querySelectorAll("#cp-"+grp+" .cpill").forEach(p=>p.classList.remove("sel"));el.classList.add("sel");}
-
-function scoreGrant(g){
-  let s=0;
-  if(WS.entity&&g.entity.includes(WS.entity))s+=28;
-  const obs=Array.from(WS.objectives);
-  if(obs.length){const h=obs.filter(o=>g.obj.includes(o)).length;s+=Math.round(h/obs.length*28);}
-  const bud=document.getElementById("f-budget").value;
-  if(!bud||g.size.includes(bud))s+=18;
-  const fnt=WS.pills.fuente;
-  if(!fnt||fnt==="indiferente"||g.fuente.includes(fnt))s+=14;
-  const tip=WS.pills.tipo;
-  if(!tip||g.tipo.includes(tip))s+=10;
-  return Math.min(99,Math.max(28,s));
+  if (id==='listado') renderList();
+  window.scrollTo({top:0, behavior:'smooth'});
 }
 
-function showWizResults(){
-  document.getElementById("ws3").classList.remove("on");WS.step=4;buildWizProg();
-  const scored=getGrants().map(g=>({...g,sc:scoreGrant(g)})).sort((a,b)=>b.sc-a.sc).slice(0,6);
-  CS.ctx=scored;
-  const open=scored.filter(g=>g.status==="open").length;
-  document.getElementById("wiz-res-sum").textContent=scored.length+" convocatorias ordenadas por compatibilidad · "+open+" actualmente abiertas";
-  document.getElementById("wiz-res-list").innerHTML=scored.map(g=>`<div class="result-row">
-    <div class="rr-src"><span class="badge ${g.src==="bdns"?"badge-bdns":"badge-eu"}">${g.src==="bdns"?"BDNS":"EU"}</span></div>
-    <div class="rr-main">
-      <div class="rr-title"><a href="${g.url}" target="_blank" rel="noopener">${g.title}</a></div>
-      <div class="rr-org">${g.org}</div>
-      <div class="rr-tags">
-        <span class="badge ${SC[g.status]||"badge-closed"}">${SL[g.status]||g.status}</span>
-        <span class="badge badge-match">${g.sc}% compatibilidad</span>
-        <span style="font-size:11px;color:var(--ink3)">${FL[g.fondo]||g.fondo}</span>
-        <span style="font-size:11px;color:var(--ink3);font-family:var(--mono)">Cierre: ${g.deadline}</span>
-      </div>
-    </div>
-    <div class="rr-right">
-      <div class="rr-amount">${g.amount}</div>
-      <button class="btn btn-ghost btn-sm" onclick="askAboutGrant('${g.title.replace(/'/g,"\\'")}')">Consultar IA</button>
-    </div>
-  </div>`).join('<div style="height:1px;background:var(--rule)"></div>');
-  document.getElementById("ws-res").classList.add("on");
-  window.scrollTo({top:document.querySelector(".wizard-wrap")?.offsetTop-55||0,behavior:"smooth"});
+// ── Wizard: progreso ──────────────────────────
+function buildWizProg() {
+  var bc  = document.getElementById('wiz-breadcrumb');
+  var lbl = document.getElementById('wiz-step-lbl');
+  if (!bc) return;
+  var isRes = WIZ_STEP > 3;
+  bc.innerHTML = WM.map(function(s, i) {
+    var n = i+1, done = WIZ_STEP > n, act = WIZ_STEP === n;
+    var cls = done ? 'done' : act ? 'active' : '';
+    return '<div class="wb-item '+cls+'">'
+      + '<div class="wb-num">'+(done?'✓':n)+'</div>'
+      + '<span>'+s+'</span></div>'
+      + (i < WM.length-1 ? '<div class="wb-sep"></div>' : '');
+  }).join('');
+  if (lbl) lbl.innerHTML = isRes
+    ? '<b>Resultados</b> del cuestionario'
+    : 'Paso <b>'+WIZ_STEP+'</b> de 3';
 }
 
-function resetWiz(){
-  WS.step=1;WS.entity=null;WS.objectives=new Set();WS.pills={fuente:"indiferente",horizonte:"medio",tipo:null};
-  document.querySelectorAll(".wstep").forEach(s=>s.classList.remove("on"));
-  document.querySelectorAll(".opt-tile").forEach(o=>o.classList.remove("sel"));
-  document.querySelectorAll(".cpill").forEach(p=>p.classList.remove("sel"));
-  document.getElementById("ws1").classList.add("on");
-  document.getElementById("nxt1").disabled=true;document.getElementById("nxt2").disabled=true;
-  document.querySelector("#cp-fuente .cpill:last-child").classList.add("sel");
-  document.querySelector("#cp-horizonte .cpill:last-child").classList.add("sel");
+function goNext(from) {
+  document.getElementById('ws'+from).classList.remove('on');
+  WIZ_STEP = from + 1;
+  document.getElementById('ws'+WIZ_STEP).classList.add('on');
+  buildWizProg();
+  var ww = document.querySelector('.wizard-wrap');
+  if (ww) window.scrollTo({top: ww.offsetTop - 55, behavior:'smooth'});
+}
+
+function goBack(from) {
+  document.getElementById('ws'+from).classList.remove('on');
+  WIZ_STEP = from - 1;
+  document.getElementById('ws'+WIZ_STEP).classList.add('on');
   buildWizProg();
 }
 
-function getFiltered(){
-  const fuente=document.getElementById("lf-fuente").value;
-  const estado=document.getElementById("lf-estado").value;
-  const obj=document.getElementById("lf-obj").value;
-  const ent=document.getElementById("lf-entity").value;
-  const fondo=document.getElementById("lf-fondo").value;
-  const q=(document.getElementById("lf-search").value||"").toLowerCase();
-  return getGrants().filter(g=>{
-    if(fuente&&g.src!==fuente)return false;
-    if(estado&&g.status!==estado)return false;
-    if(obj&&!g.obj.includes(obj))return false;
-    if(ent&&!g.entity.includes(ent))return false;
-    if(fondo&&g.fondo!==fondo)return false;
-    if(q&&!g.title.toLowerCase().includes(q)&&!g.org.toLowerCase().includes(q))return false;
+function pick(step, val, el) {
+  WIZ_ENTITY = val;
+  document.querySelectorAll('#opts'+step+' .opt-tile').forEach(function(o){o.classList.remove('sel');});
+  el.classList.add('sel');
+  var nb = document.getElementById('nxt'+step);
+  if (nb) nb.disabled = false;
+}
+
+function mpick(step, val, el) {
+  var idx = WIZ_OBJS.indexOf(val);
+  if (idx > -1) { WIZ_OBJS.splice(idx, 1); el.classList.remove('sel'); }
+  else           { WIZ_OBJS.push(val);      el.classList.add('sel'); }
+  var nb = document.getElementById('nxt'+step);
+  if (nb) nb.disabled = WIZ_OBJS.length === 0;
+}
+
+function ppick(grp, val, el) {
+  if (grp === 'fuente')    WIZ_FUENTE    = val;
+  if (grp === 'horizonte') WIZ_HORIZONTE = val;
+  if (grp === 'tipo')      WIZ_TIPO      = val;
+  document.querySelectorAll('#cp-'+grp+' .cpill').forEach(function(p){p.classList.remove('sel');});
+  el.classList.add('sel');
+}
+
+// ── Wizard: scoring y resultados ─────────────
+function scoreGrant(g) {
+  var s = 0;
+  if (WIZ_ENTITY && g.entity && g.entity.indexOf(WIZ_ENTITY) > -1) s += 28;
+  if (WIZ_OBJS.length && g.obj) {
+    var hits = WIZ_OBJS.filter(function(o){return g.obj.indexOf(o)>-1;}).length;
+    s += Math.round(hits / WIZ_OBJS.length * 28);
+  }
+  var bud = document.getElementById('f-budget') ? document.getElementById('f-budget').value : '';
+  if (!bud || (g.size && g.size.indexOf(bud)>-1)) s += 18;
+  if (!WIZ_FUENTE || WIZ_FUENTE==='indiferente' || (g.fuente && g.fuente.indexOf(WIZ_FUENTE)>-1)) s += 14;
+  if (!WIZ_TIPO || (g.tipo && g.tipo.indexOf(WIZ_TIPO)>-1)) s += 10;
+  return Math.min(99, Math.max(28, s));
+}
+
+function showWizResults() {
+  document.getElementById('ws3').classList.remove('on');
+  WIZ_STEP = 4;
+  buildWizProg();
+  var pool = GRANTS.length ? GRANTS : [];
+  var scored = pool.map(function(g){return Object.assign({}, g, {sc: scoreGrant(g)});})
+    .sort(function(a,b){return b.sc - a.sc;})
+    .slice(0, 6);
+
+  var open = scored.filter(function(g){return g.status==='open';}).length;
+  var sumEl = document.getElementById('wiz-res-sum');
+  if (sumEl) sumEl.textContent = scored.length + ' convocatorias ordenadas por compatibilidad · ' + open + ' actualmente abiertas';
+
+  var listEl = document.getElementById('wiz-res-list');
+  if (listEl) listEl.innerHTML = scored.map(function(g) {
+    var srcBadge = '<span class="badge '+(g.src==='bdns'?'badge-bdns':'badge-eu')+'">'+(g.src==='bdns'?'BDNS':'EU')+'</span>';
+    var stBadge  = '<span class="badge '+(SC[g.status]||'badge-closed')+'">'+(SL[g.status]||g.status)+'</span>';
+    var scBadge  = '<span class="badge badge-match">'+g.sc+'% compatibilidad</span>';
+    return '<div class="result-row">'
+      + '<div class="rr-src">'+srcBadge+'</div>'
+      + '<div class="rr-main">'
+      + '<div class="rr-title"><a href="'+g.url+'" target="_blank" rel="noopener">'+g.title+'</a></div>'
+      + '<div class="rr-org">'+(g.org||'')+'</div>'
+      + '<div class="rr-tags">'+stBadge+scBadge
+      + '<span style="font-size:11px;color:var(--ink3)">'+(FL[g.fondo]||g.fondo||'')+'</span>'
+      + '<span style="font-size:11px;color:var(--ink3);font-family:var(--mono)">Cierre: '+(g.deadline||'—')+'</span>'
+      + '</div></div>'
+      + '<div class="rr-right">'
+      + '<div class="rr-amount">'+(g.amount||'Consultar')+'</div>'
+      + '<button class="btn btn-ghost btn-sm" onclick="askAboutGrant(''+g.title.replace(/'/g,"\'")+'')" >Consultar IA</button>'
+      + '</div></div>';
+  }).join('<div style="height:1px;background:var(--rule)"></div>');
+
+  document.getElementById('ws-res').classList.add('on');
+}
+
+function resetWiz() {
+  WIZ_STEP=1; WIZ_ENTITY=null; WIZ_OBJS=[]; WIZ_BUDGET='';
+  WIZ_FUENTE='indiferente'; WIZ_HORIZONTE='medio'; WIZ_TIPO=null;
+  document.querySelectorAll('.wstep').forEach(function(s){s.classList.remove('on');});
+  document.querySelectorAll('.opt-tile').forEach(function(o){o.classList.remove('sel');});
+  document.querySelectorAll('.cpill').forEach(function(p){p.classList.remove('sel');});
+  document.getElementById('ws1').classList.add('on');
+  document.getElementById('nxt1').disabled = true;
+  document.getElementById('nxt2').disabled = true;
+  var df = document.querySelector('#cp-fuente .cpill:last-child');
+  var dh = document.querySelector('#cp-horizonte .cpill:last-child');
+  if (df) df.classList.add('sel');
+  if (dh) dh.classList.add('sel');
+  buildWizProg();
+}
+
+// ── Listado: filtrado y renderizado ──────────
+function getFiltered() {
+  var fuente = document.getElementById('lf-fuente') ? document.getElementById('lf-fuente').value : '';
+  var estado  = document.getElementById('lf-estado') ? document.getElementById('lf-estado').value : '';
+  var obj     = document.getElementById('lf-obj')    ? document.getElementById('lf-obj').value    : '';
+  var ent     = document.getElementById('lf-entity') ? document.getElementById('lf-entity').value : '';
+  var fondo   = document.getElementById('lf-fondo')  ? document.getElementById('lf-fondo').value  : '';
+  var q       = (document.getElementById('lf-search') ? document.getElementById('lf-search').value : '').toLowerCase();
+
+  return GRANTS.filter(function(g) {
+    if (fuente && g.src !== fuente)                            return false;
+    if (estado && g.status !== estado)                         return false;
+    if (obj    && (!g.obj || g.obj.indexOf(obj) === -1))       return false;
+    if (ent    && (!g.entity || g.entity.indexOf(ent) === -1)) return false;
+    if (fondo  && g.fondo !== fondo)                           return false;
+    if (q && !(g.title||'').toLowerCase().includes(q)
+          && !(g.org||'').toLowerCase().includes(q))           return false;
     return true;
   });
 }
 
-function sortList(col){
-  if(LS.sort===col)LS.dir=LS.dir==="asc"?"desc":"asc";else{LS.sort=col;LS.dir="asc";}
-  LS.page=1;
-  document.querySelectorAll("[id^='si-']").forEach(el=>el.textContent="↕");
-  const ic=document.getElementById("si-"+col);if(ic)ic.textContent=LS.dir==="asc"?"↑":"↓";
+function sortList(col) {
+  if (LIST_SORT === col) LIST_DIR = LIST_DIR === 'asc' ? 'desc' : 'asc';
+  else { LIST_SORT = col; LIST_DIR = 'asc'; }
+  LIST_PAGE = 1;
+  document.querySelectorAll('[id^="si-"]').forEach(function(el){el.textContent='↕';});
+  var ic = document.getElementById('si-'+col);
+  if (ic) ic.textContent = LIST_DIR === 'asc' ? '↑' : '↓';
   renderList();
 }
 
-function renderList(){
-  let data=[...getFiltered()];
-  data.sort((a,b)=>{
-    let av=LS.sort==="deadline"?(a.deadlineSort||a.ds):LS.sort==="amount"?a.amountNum:(a[LS.sort]||"");
-    let bv=LS.sort==="deadline"?(b.deadlineSort||b.ds):LS.sort==="amount"?b.amountNum:(b[LS.sort]||"");
-    const r=typeof av==="number"?av-bv:String(av).localeCompare(String(bv),"es");
-    return LS.dir==="asc"?r:-r;
+function renderList() {
+  var data = getFiltered();
+  data.sort(function(a, b) {
+    var av = LIST_SORT==='deadline' ? (a.deadlineSort||'9999')
+           : LIST_SORT==='amount'   ? (a.amountNum||0)
+           : (a[LIST_SORT]||'');
+    var bv = LIST_SORT==='deadline' ? (b.deadlineSort||'9999')
+           : LIST_SORT==='amount'   ? (b.amountNum||0)
+           : (b[LIST_SORT]||'');
+    var r = typeof av==='number' ? av-bv : String(av).localeCompare(String(bv),'es');
+    return LIST_DIR==='asc' ? r : -r;
   });
-  const total=data.length,pages=Math.max(1,Math.ceil(total/LS.per));
-  if(LS.page>pages)LS.page=1;
-  const slice=data.slice((LS.page-1)*LS.per,LS.page*LS.per);
-  document.getElementById("list-count").innerHTML=`<b>${total}</b> convocatoria${total!==1?"s":""} encontrada${total!==1?"s":""}`;
-  document.getElementById("stc-listado").textContent=total;
-  document.getElementById("list-tbody").innerHTML=slice.length?slice.map(g=>`<tr>
-    <td class="td-title" style="max-width:230px"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px" title="${g.title}"><a href="${g.url}" target="_blank" rel="noopener">${g.title}</a></div></td>
-    <td class="td-org"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:165px" title="${g.org}">${g.org}</div></td>
-    <td><span class="badge ${g.src==="bdns"?"badge-bdns":"badge-eu"}">${g.src==="bdns"?"BDNS":"EU F&T"}</span></td>
-    <td style="font-size:12px;color:var(--ink2);white-space:nowrap">${FL[g.fondo]||g.fondo}</td>
-    <td><span class="badge ${SC[g.status]||"badge-closed"}">${SL[g.status]||g.status}</span></td>
-    <td class="td-mono">${g.deadline}</td>
-    <td class="td-amt">${g.amount}</td>
-    <td><a href="${g.url}" target="_blank" rel="noopener" style="color:var(--accent);font-size:12px;text-decoration:none;white-space:nowrap">↗ Ver</a></td>
-  </tr>`).join(""):`<tr><td colspan="8" style="padding:2rem;text-align:center;color:var(--ink3);font-size:12.5px">No se encontraron convocatorias con los filtros aplicados.</td></tr>`;
-  const pag=document.getElementById("list-pag");
-  if(pages<=1){pag.innerHTML="";return;}
-  let h=`<button class="pg" ${LS.page===1?"disabled":""} onclick="changePage(${LS.page-1})">‹</button>`;
-  for(let p=1;p<=pages;p++){
-    if(pages>7&&p>2&&p<pages-1&&Math.abs(p-LS.page)>1){if(p===3||p===pages-2)h+='<span style="padding:0 3px;color:var(--ink4);font-size:12px">…</span>';continue;}
-    h+=`<button class="pg ${p===LS.page?"on":""}" onclick="changePage(${p})">${p}</button>`;
+
+  var total  = data.length;
+  var pages  = Math.max(1, Math.ceil(total / LIST_PER));
+  if (LIST_PAGE > pages) LIST_PAGE = 1;
+  var slice  = data.slice((LIST_PAGE-1)*LIST_PER, LIST_PAGE*LIST_PER);
+
+  var cntEl = document.getElementById('list-count');
+  var stcEl = document.getElementById('stc-listado');
+  if (cntEl) cntEl.innerHTML = '<b>'+total+'</b> convocatoria'+(total!==1?'s':'')+' encontrada'+(total!==1?'s':'');
+  if (stcEl) stcEl.textContent = GRANTS.length;
+
+  var tbody = document.getElementById('list-tbody');
+  if (!tbody) return;
+
+  if (!GRANTS.length) return; // loading state already shown
+
+  if (!slice.length) {
+    tbody.innerHTML = '<tr><td colspan="8" style="padding:2rem;text-align:center;color:var(--ink3);font-size:12.5px">No se encontraron convocatorias con los filtros aplicados.</td></tr>';
+  } else {
+    tbody.innerHTML = slice.map(function(g) {
+      return '<tr>'
+        + '<td class="td-title" style="max-width:230px"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px" title="'+g.title+'">'
+        + '<a href="'+g.url+'" target="_blank" rel="noopener">'+g.title+'</a></div></td>'
+        + '<td class="td-org"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:165px" title="'+(g.org||'')+'">'+(g.org||'—')+'</div></td>'
+        + '<td><span class="badge '+(g.src==='bdns'?'badge-bdns':'badge-eu')+'">'+(g.src==='bdns'?'BDNS':'EU F&T')+'</span></td>'
+        + '<td style="font-size:12px;color:var(--ink2);white-space:nowrap">'+(FL[g.fondo]||g.fondo||'—')+'</td>'
+        + '<td><span class="badge '+(SC[g.status]||'badge-closed')+'">'+(SL[g.status]||g.status||'—')+'</span></td>'
+        + '<td class="td-mono">'+(g.deadline||'—')+'</td>'
+        + '<td class="td-amt">'+(g.amount||'—')+'</td>'
+        + '<td style="white-space:nowrap"><a href="'+g.url+'" target="_blank" rel="noopener" style="color:var(--accent);font-size:12px;text-decoration:none">↗ Ver</a></td>'
+        + '</tr>';
+    }).join('');
   }
-  h+=`<button class="pg" ${LS.page===pages?"disabled":""} onclick="changePage(${LS.page+1})">›</button>`;
-  h+=`<span style="margin-left:auto;font-size:11px;color:var(--ink3);font-family:var(--mono)">${(LS.page-1)*LS.per+1}–${Math.min(LS.page*LS.per,total)} de ${total}</span>`;
-  pag.innerHTML=h;
-}
-function changePage(p){LS.page=p;renderList();document.getElementById("pane-listado").scrollIntoView({behavior:"smooth",block:"start"});}
-function clearFilters(){["lf-fuente","lf-estado","lf-obj","lf-entity","lf-fondo"].forEach(id=>{const el=document.getElementById(id);if(el)el.value="";});document.getElementById("lf-search").value="";LS.page=1;renderList();}
 
-function exportExcel(mode){
-  let data;
-  if(mode==="wiz"){const scored=getGrants().map(g=>({...g,sc:scoreGrant(g)})).sort((a,b)=>b.sc-a.sc).slice(0,6);data=scored.map(g=>({"Convocatoria":g.title,"Entidad convocante":g.org,"Fuente":g.src==="bdns"?"BDNS":"Funding & Tenders EU","Tipo de fondo":FL[g.fondo]||g.fondo,"Estado":SL[g.status]||g.status,"Fecha de cierre":g.deadline,"Importe máximo":g.amount,"Compatibilidad (%)":g.sc,"URL":g.url}));}
-  else{data=getFiltered().map(g=>({"Convocatoria":g.title,"Entidad convocante":g.org,"Fuente":g.src==="bdns"?"BDNS":"Funding & Tenders EU","Tipo de fondo":FL[g.fondo]||g.fondo,"Estado":SL[g.status]||g.status,"Fecha de cierre":g.deadline,"Importe máximo":g.amount,"URL":g.url}));}
-  const ws=XLSX.utils.json_to_sheet(data);
-  ws["!cols"]=[{wch:48},{wch:36},{wch:22},{wch:20},{wch:16},{wch:14},{wch:20},{wch:6},{wch:55}];
-  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Convocatorias");
-  XLSX.writeFile(wb,"FinanciApp_NTT_DATA_"+new Date().toISOString().slice(0,10)+".xlsx");
+  // Pagination
+  var pag = document.getElementById('list-pag');
+  if (!pag) return;
+  if (pages <= 1) { pag.innerHTML = ''; return; }
+  var h = '<button class="pg" '+(LIST_PAGE===1?'disabled':'')+' onclick="changePage('+(LIST_PAGE-1)+')">‹</button>';
+  for (var p = 1; p <= pages; p++) {
+    if (pages>7 && p>2 && p<pages-1 && Math.abs(p-LIST_PAGE)>1) {
+      if (p===3||p===pages-2) h+='<span style="padding:0 3px;color:var(--ink4);font-size:12px">…</span>';
+      continue;
+    }
+    h += '<button class="pg '+(p===LIST_PAGE?'on':'')+'" onclick="changePage('+p+')">'+p+'</button>';
+  }
+  h += '<button class="pg" '+(LIST_PAGE===pages?'disabled':'')+' onclick="changePage('+(LIST_PAGE+1)+')">›</button>';
+  h += '<span style="margin-left:auto;font-size:11px;color:var(--ink3);font-family:var(--mono)">'
+    + ((LIST_PAGE-1)*LIST_PER+1)+'–'+Math.min(LIST_PAGE*LIST_PER,total)+' de '+total+'</span>';
+  pag.innerHTML = h;
 }
 
-function toggleChat(){CS.open=!CS.open;document.getElementById("chat-panel").style.display=CS.open?"flex":"none";if(CS.open&&!CS.greeted){CS.greeted=true;addMsg("bot","Buenos días. Soy el asistente de financiación pública de NTT DATA.\n\nPuedo ayudarle a comprender los requisitos de elegibilidad de una convocatoria, comparar instrumentos de financiación, orientarle sobre documentación necesaria o explicarle el proceso de solicitud. ¿En qué puedo asistirle?");}}
-function openChat(){if(!CS.open)toggleChat();}
-function addMsg(role,text){
-  const c=document.getElementById("chat-msgs");
-  const d=document.createElement("div");d.className="msg-row "+role;
-  d.innerHTML=`<div class="msg-av ${role==="user"?"user":""}">${role==="bot"?"IA":"Ud."}</div><div class="msg-bubble">${text.replace(/\n/g,"<br>")}</div>`;
-  c.appendChild(d);c.scrollTop=c.scrollHeight;CS.history.push({role:role==="bot"?"assistant":"user",content:text});
+function changePage(p) {
+  LIST_PAGE = p;
+  renderList();
+  document.getElementById('pane-listado').scrollIntoView({behavior:'smooth', block:'start'});
 }
-function showTyping(){const c=document.getElementById("chat-msgs");const d=document.createElement("div");d.className="msg-row bot";d.id="typing-row";d.innerHTML='<div class="msg-av">IA</div><div class="msg-typing"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div>';c.appendChild(d);c.scrollTop=c.scrollHeight;}
-function hideTyping(){const t=document.getElementById("typing-row");if(t)t.remove();}
-async function sendChat(){
-  const inp=document.getElementById("chat-input");const txt=inp.value.trim();if(!txt)return;
-  inp.value="";addMsg("user",txt);
-  document.getElementById("chat-send").disabled=true;document.getElementById("chat-quick").style.display="none";showTyping();
-  let sys=`Eres el asistente experto en financiación pública de NTT DATA. Asesoras en España y la UE. Tienes conocimiento profundo de: BDNS, Horizon Europe, EIC Accelerator, Programa LIFE, Erasmus+, MCE Digital, CDTI, Kit Digital, PERTEs, ICEX, Fondos FEDER, FSE+. Explicas con precisión: requisitos de elegibilidad, intensidades de ayuda, documentación necesaria, plazos y proceso de solicitud. Eres formal, preciso y conciso. Responde siempre en español. Máximo 180 palabras.`;
-  if(CS.ctx)sys+=`\n\nConvocatorias recomendadas al usuario: ${CS.ctx.map(g=>g.title).join("; ")}.`;
-  const msgs=CS.history.slice(-8).map(m=>({role:m.role,content:m.content}));
-  try{
-    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:400,system:sys,messages:msgs})});
-    const data=await res.json();hideTyping();
-    addMsg("bot",data.content?.[0]?.text||"No se pudo procesar la respuesta.");
-  }catch{hideTyping();addMsg("bot","El servicio no está disponible en este momento.");}
-  document.getElementById("chat-send").disabled=false;inp.focus();
+
+function clearFilters() {
+  ['lf-fuente','lf-estado','lf-obj','lf-entity','lf-fondo'].forEach(function(id){
+    var el = document.getElementById(id); if (el) el.value='';
+  });
+  var s = document.getElementById('lf-search'); if (s) s.value='';
+  LIST_PAGE = 1;
+  renderList();
 }
-function quickMsg(txt){document.getElementById("chat-input").value=txt;sendChat();}
-function askAboutGrant(title){openChat();document.getElementById("chat-input").value=`Explíqueme los requisitos de elegibilidad y el proceso de solicitud de la convocatoria: "${title}"`;sendChat();}
+
+// ── Excel export ──────────────────────────────
+function exportExcel(mode) {
+  var data;
+  if (mode === 'wiz') {
+    data = GRANTS.map(function(g){return Object.assign({},g,{sc:scoreGrant(g)});})
+      .sort(function(a,b){return b.sc-a.sc;}).slice(0,6)
+      .map(function(g){return {'Convocatoria':g.title,'Entidad convocante':g.org,'Fuente':g.src==='bdns'?'BDNS':'Funding & Tenders EU','Tipo de fondo':FL[g.fondo]||g.fondo,'Estado':SL[g.status]||g.status,'Fecha de cierre':g.deadline,'Importe máximo':g.amount,'Compatibilidad (%)':g.sc,'URL':g.url};});
+  } else {
+    data = getFiltered().map(function(g){
+      return {'Convocatoria':g.title,'Entidad convocante':g.org,'Fuente':g.src==='bdns'?'BDNS':'Funding & Tenders EU','Tipo de fondo':FL[g.fondo]||g.fondo,'Estado':SL[g.status]||g.status,'Fecha de cierre':g.deadline,'Importe máximo':g.amount,'URL':g.url};
+    });
+  }
+  if (typeof XLSX === 'undefined') { alert('Librería Excel no disponible. Inténtelo de nuevo.'); return; }
+  var ws = XLSX.utils.json_to_sheet(data);
+  ws['!cols'] = [{wch:48},{wch:36},{wch:22},{wch:20},{wch:16},{wch:14},{wch:20},{wch:6},{wch:55}];
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Convocatorias');
+  XLSX.writeFile(wb, 'FinanciApp_NTT_DATA_'+new Date().toISOString().slice(0,10)+'.xlsx');
+}
+
+// ── Chatbot ───────────────────────────────────
+var CHAT_OPEN    = false;
+var CHAT_HISTORY = [];
+var CHAT_GREETED = false;
+
+function toggleChat() {
+  CHAT_OPEN = !CHAT_OPEN;
+  document.getElementById('chat-panel').style.display = CHAT_OPEN ? 'flex' : 'none';
+  if (CHAT_OPEN && !CHAT_GREETED) {
+    CHAT_GREETED = true;
+    addMsg('bot', 'Buenos días. Soy el asistente de financiación pública de NTT DATA.
+
+Puedo ayudarle a comprender los requisitos de elegibilidad de una convocatoria, comparar instrumentos de financiación, orientarle sobre documentación necesaria o explicarle el proceso de solicitud. ¿En qué puedo asistirle?');
+  }
+}
+
+function openChat() { if (!CHAT_OPEN) toggleChat(); }
+
+function addMsg(role, text) {
+  var c = document.getElementById('chat-msgs');
+  var d = document.createElement('div');
+  d.className = 'msg-row ' + role;
+  d.innerHTML = '<div class="msg-av '+(role==='user'?'user':'')+'">'+(role==='bot'?'IA':'Ud.')+'</div>'
+    + '<div class="msg-bubble">'+text.replace(/
+/g,'<br>')+'</div>';
+  c.appendChild(d);
+  c.scrollTop = c.scrollHeight;
+  CHAT_HISTORY.push({role: role==='bot'?'assistant':'user', content: text});
+}
+
+function showTyping() {
+  var c = document.getElementById('chat-msgs');
+  var d = document.createElement('div');
+  d.className = 'msg-row bot'; d.id = 'typing-row';
+  d.innerHTML = '<div class="msg-av">IA</div><div class="msg-typing"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div>';
+  c.appendChild(d); c.scrollTop = c.scrollHeight;
+}
+function hideTyping() { var t=document.getElementById('typing-row'); if(t)t.remove(); }
+
+async function sendChat() {
+  var inp = document.getElementById('chat-input');
+  var txt = inp.value.trim(); if (!txt) return;
+  inp.value = '';
+  addMsg('user', txt);
+  document.getElementById('chat-send').disabled = true;
+  document.getElementById('chat-quick').style.display = 'none';
+  showTyping();
+
+  var sys = 'Eres el asistente experto en financiación pública de NTT DATA. Asesoras en España y la UE. Conoces BDNS, Horizon Europe, EIC Accelerator, Programa LIFE, Erasmus+, CDTI, Kit Digital, PERTEs, ICEX. Explicas requisitos, plazos y proceso de solicitud. Eres formal, preciso y conciso. Responde en español. Máximo 180 palabras.';
+  var msgs = CHAT_HISTORY.slice(-8).map(function(m){return {role:m.role,content:m.content};});
+
+  try {
+    var r = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:400,system:sys,messages:msgs})
+    });
+    var data = await r.json();
+    hideTyping();
+    addMsg('bot', data.content?.[0]?.text || 'No se pudo procesar la respuesta.');
+  } catch(e) {
+    hideTyping();
+    addMsg('bot', 'El servicio no está disponible en este momento.');
+  }
+  document.getElementById('chat-send').disabled = false;
+  inp.focus();
+}
+
+function quickMsg(txt) { document.getElementById('chat-input').value=txt; sendChat(); }
+function askAboutGrant(title) {
+  openChat();
+  document.getElementById('chat-input').value = 'Explíqueme los requisitos de la convocatoria: "'+title+'"';
+  sendChat();
+}
 </script>
 </body>
 </html>
