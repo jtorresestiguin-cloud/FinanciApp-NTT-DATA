@@ -1,7 +1,6 @@
 {
   "name": "financiapp-ntt-data",
   "version": "1.0.0",
-  "description": "Buscador de financiación pública — NTT DATA",
   "private": true,
   "engines": {
     "node": "20.x"
