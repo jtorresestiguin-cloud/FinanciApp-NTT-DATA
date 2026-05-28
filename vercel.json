@@ -1,12 +1,5 @@
 {
   "version": 2,
-  "functions": {
-    "api/eu-grants.js": {
-      "runtime": "nodejs20.x",
-      "maxDuration": 30,
-      "memory": 256
-    }
-  },
   "headers": [
     {
       "source": "/api/(.*)",
